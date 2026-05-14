@@ -291,6 +291,25 @@ func encryptByTag(v interface{}) error {
 
 // decryptByTag decrypts a struct in-place using gormcrypt tags.
 func decryptByTag(v interface{}) error {
+	return decryptByTagLoaded(v, nil)
+}
+
+// EncryptTagged encrypts all gormcrypt-tagged string fields in place. This is the
+// same operation as the Create/Update callbacks. Use it if you encrypt outside
+// GORM or after temporarily calling DecryptTagged.
+func EncryptTagged(v interface{}) error {
+	return encryptByTag(v)
+}
+
+// DecryptTagged decrypts tagged fields in place (same as the Query/Row callbacks).
+// After db.Create or db.Update, tagged columns are ciphertext in memory; call
+// DecryptTagged if a hook (e.g. AfterCreate) needs plaintext for a welcome email,
+// then avoid persisting that struct without EncryptTagged before the next Save.
+func DecryptTagged(v interface{}) error {
+	return decryptByTag(v)
+}
+
+func decryptByTagLoaded(v interface{}, isLoaded func(tagMeta) bool) error {
 	meta, err := getModelMeta(v)
 	if err != nil || len(meta.tags) == 0 {
 		return err
@@ -310,6 +329,9 @@ func decryptByTag(v interface{}) error {
 	// Collect ciphertexts from tagged fields.
 	encData := make(row.EncryptedData, len(meta.tags))
 	for _, tm := range meta.tags {
+		if isLoaded != nil && !isLoaded(tm) {
+			continue
+		}
 		fv := rv.FieldByName(tm.fieldName)
 		if !fv.IsValid() {
 			continue
@@ -334,21 +356,6 @@ func decryptByTag(v interface{}) error {
 	}
 
 	return nil
-}
-
-// EncryptTagged encrypts all gormcrypt-tagged string fields in place. This is the
-// same operation as the Create/Update callbacks. Use it if you encrypt outside
-// GORM or after temporarily calling DecryptTagged.
-func EncryptTagged(v interface{}) error {
-	return encryptByTag(v)
-}
-
-// DecryptTagged decrypts tagged fields in place (same as the Query/Row callbacks).
-// After db.Create or db.Update, tagged columns are ciphertext in memory; call
-// DecryptTagged if a hook (e.g. AfterCreate) needs plaintext for a welcome email,
-// then avoid persisting that struct without EncryptTagged before the next Save.
-func DecryptTagged(v interface{}) error {
-	return decryptByTag(v)
 }
 
 // ── Tag callbacks ─────────────────────────────────────────────────────────────
@@ -412,6 +419,7 @@ func tagDecryptCallback(db *gorm.DB) {
 }
 
 func tagWalkDest(db *gorm.DB, dest interface{}) {
+	isLoaded := selectedTagFieldFilter(db)
 	rv := reflect.ValueOf(dest)
 	for rv.Kind() == reflect.Ptr {
 		rv = rv.Elem()
@@ -423,14 +431,37 @@ func tagWalkDest(db *gorm.DB, dest interface{}) {
 			if elem.Kind() == reflect.Ptr {
 				elem = elem.Elem()
 			}
-			if err := decryptByTag(elem.Addr().Interface()); err != nil {
+			if err := decryptByTagLoaded(elem.Addr().Interface(), isLoaded); err != nil {
 				_ = db.AddError(fmt.Errorf("gormcrypt tag decrypt: %w", err))
 			}
 		}
 	default:
-		if err := decryptByTag(dest); err != nil {
+		if err := decryptByTagLoaded(dest, isLoaded); err != nil {
 			_ = db.AddError(fmt.Errorf("gormcrypt tag decrypt: %w", err))
 		}
+	}
+}
+
+func selectedTagFieldFilter(db *gorm.DB) func(tagMeta) bool {
+	if db == nil || db.Statement == nil || db.Statement.Schema == nil {
+		return nil
+	}
+
+	columns, restricted := db.Statement.SelectAndOmitColumns(false, false)
+	if len(columns) == 0 && !restricted {
+		return nil
+	}
+
+	return func(tm tagMeta) bool {
+		dbName := tm.csField
+		if field := db.Statement.Schema.LookUpField(tm.fieldName); field != nil && field.DBName != "" {
+			dbName = field.DBName
+		}
+
+		if selected, ok := columns[dbName]; ok {
+			return selected
+		}
+		return !restricted
 	}
 }
 

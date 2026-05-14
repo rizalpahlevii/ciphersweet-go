@@ -300,3 +300,38 @@ func TestGormCallbacksDB(t *testing.T) {
 		t.Fatalf("Expected decrypted email integrate@example.com, got %s", retrieved.Email)
 	}
 }
+
+func TestGormCallbacksSkipDecryptForUnselectedEncryptedFields(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	db := testDB(t)
+	if err := db.AutoMigrate(&User{}); err != nil {
+		t.Skipf("AutoMigrate failed: %v", err)
+	}
+
+	if err := RegisterTagCallbacks(db); err != nil {
+		t.Fatal(err)
+	}
+
+	u := User{
+		Email: "projection@example.com",
+		Phone: "+6282",
+		Nisn:  "9001",
+	}
+	if err := db.Create(&u).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var retrieved User
+	if err := db.Select("id").First(&retrieved, u.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if retrieved.ID != u.ID {
+		t.Fatalf("Expected ID %d, got %d", u.ID, retrieved.ID)
+	}
+	if retrieved.Email != "" || retrieved.Phone != "" || retrieved.Nisn != "" {
+		t.Fatalf("Expected unselected encrypted fields to remain empty, got %+v", retrieved)
+	}
+}
