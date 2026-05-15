@@ -335,3 +335,34 @@ func TestGormCallbacksSkipDecryptForUnselectedEncryptedFields(t *testing.T) {
 		t.Fatalf("Expected unselected encrypted fields to remain empty, got %+v", retrieved)
 	}
 }
+
+func TestGormCallbacksSkipDecryptForScalarCountDest(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	db := testDB(t)
+	if err := db.AutoMigrate(&User{}); err != nil {
+		t.Skipf("AutoMigrate failed: %v", err)
+	}
+
+	if err := RegisterTagCallbacks(db); err != nil {
+		t.Fatal(err)
+	}
+
+	u := User{
+		Email: "count@example.com",
+		Phone: "+6283",
+		Nisn:  "9002",
+	}
+	if err := db.Create(&u).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var total int64
+	if err := db.Model(&User{}).Count(&total).Error; err != nil {
+		t.Fatal(err)
+	}
+	if total < 1 {
+		t.Fatalf("Expected count to include inserted user, got %d", total)
+	}
+}

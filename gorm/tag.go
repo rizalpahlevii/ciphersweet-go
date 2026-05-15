@@ -422,6 +422,9 @@ func tagWalkDest(db *gorm.DB, dest interface{}) {
 	isLoaded := selectedTagFieldFilter(db)
 	rv := reflect.ValueOf(dest)
 	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return
+		}
 		rv = rv.Elem()
 	}
 	switch rv.Kind() {
@@ -429,13 +432,19 @@ func tagWalkDest(db *gorm.DB, dest interface{}) {
 		for i := 0; i < rv.Len(); i++ {
 			elem := rv.Index(i)
 			if elem.Kind() == reflect.Ptr {
+				if elem.IsNil() {
+					continue
+				}
 				elem = elem.Elem()
+			}
+			if elem.Kind() != reflect.Struct {
+				continue
 			}
 			if err := decryptByTagLoaded(elem.Addr().Interface(), isLoaded); err != nil {
 				_ = db.AddError(fmt.Errorf("gormcrypt tag decrypt: %w", err))
 			}
 		}
-	default:
+	case reflect.Struct:
 		if err := decryptByTagLoaded(dest, isLoaded); err != nil {
 			_ = db.AddError(fmt.Errorf("gormcrypt tag decrypt: %w", err))
 		}
