@@ -114,11 +114,11 @@ func getModelMeta(v interface{}) (*modelMeta, error) {
 	// Override with gormcrypt.SetTableName. Default: plural lowercase of type name.
 	meta.tableName = toSnakePlural(t.Name())
 
-	// Build a map of all string field names for index field lookup.
+	// Build a map of all string-like field names for index field lookup.
 	allFields := make(map[string]string) // lowerName → structFieldName
 	for i := 0; i < t.NumField(); i++ {
 		sf := t.Field(i)
-		if sf.Type.Kind() == reflect.String {
+		if isStringLikeType(sf.Type) {
 			allFields[strings.ToLower(sf.Name)] = sf.Name
 		}
 	}
@@ -126,7 +126,7 @@ func getModelMeta(v interface{}) (*modelMeta, error) {
 	for i := 0; i < t.NumField(); i++ {
 		sf := t.Field(i)
 		tag := sf.Tag.Get("gormcrypt")
-		if tag == "" || sf.Type.Kind() != reflect.String {
+		if tag == "" || !isStringLikeType(sf.Type) {
 			continue
 		}
 
@@ -245,10 +245,10 @@ func encryptByTag(v interface{}) error {
 	data := make(row.RowData, len(meta.tags))
 	for _, tm := range meta.tags {
 		fv := rv.FieldByName(tm.fieldName)
-		if !fv.IsValid() {
+		val, ok := stringLikeValue(fv)
+		if !ok {
 			continue
 		}
-		val := fv.String()
 		// Skip if already a ciphertext (idempotent — don't double-encrypt).
 		if strings.HasPrefix(val, "nacl:") || strings.HasPrefix(val, "boring:") {
 			return nil
@@ -268,7 +268,7 @@ func encryptByTag(v interface{}) error {
 			continue
 		}
 		if ct, ok := encrypted[tm.csField]; ok {
-			fv.SetString(ct)
+			setStringLikeValue(fv, ct)
 		}
 	}
 
@@ -282,7 +282,7 @@ func encryptByTag(v interface{}) error {
 			continue
 		}
 		if val, ok := indexes[tm.indexCol]; ok {
-			fv.SetString(val)
+			setStringLikeValue(fv, val)
 		}
 	}
 
@@ -333,10 +333,11 @@ func decryptByTagLoaded(v interface{}, isLoaded func(tagMeta) bool) error {
 			continue
 		}
 		fv := rv.FieldByName(tm.fieldName)
-		if !fv.IsValid() {
+		ct, ok := stringLikeValue(fv)
+		if !ok {
 			continue
 		}
-		encData[tm.csField] = fv.String()
+		encData[tm.csField] = ct
 	}
 
 	decrypted, err := er.DecryptRow(encData)
@@ -351,7 +352,7 @@ func decryptByTagLoaded(v interface{}, isLoaded func(tagMeta) bool) error {
 			continue
 		}
 		if pt, ok := decrypted[tm.csField]; ok {
-			fv.SetString(pt)
+			setStringLikeValue(fv, pt)
 		}
 	}
 
@@ -390,7 +391,7 @@ func RegisterTagCallbacks(db *gorm.DB) error {
 	if err := cb.Create().Before("gorm:create").Register("gormcrypt:tag:encrypt", tagEncryptCallback); err != nil {
 		return fmt.Errorf("gormcrypt: register tag create callback: %w", err)
 	}
-	if err := cb.Update().Before("gorm:update").Register("gormcrypt:tag:encrypt", tagEncryptCallback); err != nil {
+	if err := cb.Update().Before("gorm:update").Register("gormcrypt:tag:encrypt", tagUpdateEncryptCallback); err != nil {
 		return fmt.Errorf("gormcrypt: register tag update callback: %w", err)
 	}
 	if err := cb.Query().After("gorm:query").Register("gormcrypt:tag:decrypt", tagDecryptCallback); err != nil {
@@ -409,6 +410,159 @@ func tagEncryptCallback(db *gorm.DB) {
 	if err := encryptByTag(db.Statement.Model); err != nil {
 		_ = db.AddError(fmt.Errorf("gormcrypt tag encrypt: %w", err))
 	}
+}
+
+func tagUpdateEncryptCallback(db *gorm.DB) {
+	if db.Error != nil || db.Statement == nil || db.Statement.Model == nil {
+		return
+	}
+	if err := encryptUpdateMapByTag(db); err != nil {
+		_ = db.AddError(fmt.Errorf("gormcrypt tag encrypt: %w", err))
+		return
+	}
+	if err := encryptUpdateStructByTag(db); err != nil {
+		_ = db.AddError(fmt.Errorf("gormcrypt tag encrypt: %w", err))
+		return
+	}
+	if db.Statement.Dest == db.Statement.Model {
+		if err := encryptByTag(db.Statement.Model); err != nil {
+			_ = db.AddError(fmt.Errorf("gormcrypt tag encrypt: %w", err))
+		}
+	}
+}
+
+func encryptUpdateMapByTag(db *gorm.DB) error {
+	values, ok := db.Statement.Dest.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	meta, err := getModelMeta(db.Statement.Model)
+	if err != nil || len(meta.tags) == 0 {
+		return err
+	}
+
+	t := reflect.TypeOf(db.Statement.Model)
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	er, err := getTagRow(t, meta)
+	if err != nil {
+		return err
+	}
+
+	for _, tm := range meta.tags {
+		key, plaintext, ok := taggedUpdateValue(values, tm)
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(plaintext, "nacl:") || strings.HasPrefix(plaintext, "boring:") {
+			continue
+		}
+
+		encrypted, indexes, err := er.PrepareForStorage(row.RowData{tm.csField: plaintext})
+		if err != nil {
+			return fmt.Errorf("gormcrypt tag encrypt: %w", err)
+		}
+		if ct, ok := encrypted[tm.csField]; ok {
+			values[key] = ct
+		}
+		if idx, ok := indexes[tm.indexCol]; ok {
+			values[tm.indexCol] = idx
+		}
+	}
+
+	return nil
+}
+
+func encryptUpdateStructByTag(db *gorm.DB) error {
+	if _, ok := db.Statement.Dest.(map[string]interface{}); ok {
+		return nil
+	}
+
+	meta, err := getModelMeta(db.Statement.Model)
+	if err != nil || len(meta.tags) == 0 {
+		return err
+	}
+
+	rv := reflect.ValueOf(db.Statement.Dest)
+	if !rv.IsValid() {
+		return nil
+	}
+	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return nil
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return nil
+	}
+
+	t := reflect.TypeOf(db.Statement.Model)
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	er, err := getTagRow(t, meta)
+	if err != nil {
+		return err
+	}
+
+	copyValue := reflect.New(rv.Type()).Elem()
+	copyValue.Set(rv)
+	changed := false
+
+	for _, tm := range meta.tags {
+		fv := copyValue.FieldByName(tm.fieldName)
+		plaintext, ok := stringLikeValue(fv)
+		if !ok || !fv.CanSet() {
+			continue
+		}
+		if plaintext == "" || strings.HasPrefix(plaintext, "nacl:") || strings.HasPrefix(plaintext, "boring:") {
+			continue
+		}
+
+		encrypted, indexes, err := er.PrepareForStorage(row.RowData{tm.csField: plaintext})
+		if err != nil {
+			return fmt.Errorf("gormcrypt tag encrypt: %w", err)
+		}
+		if ct, ok := encrypted[tm.csField]; ok {
+			setStringLikeValue(fv, ct)
+			changed = true
+		}
+		if idx, ok := indexes[tm.indexCol]; ok && tm.indexField != "" {
+			idxField := copyValue.FieldByName(tm.indexField)
+			if idxField.IsValid() && idxField.CanSet() {
+				setStringLikeValue(idxField, idx)
+			}
+		}
+	}
+
+	if changed {
+		db.Statement.Dest = copyValue.Addr().Interface()
+	}
+	return nil
+}
+
+func taggedUpdateValue(values map[string]interface{}, tm tagMeta) (string, string, bool) {
+	for _, key := range []string{tm.fieldName, tm.csField} {
+		if value, ok := values[key]; ok {
+			switch v := value.(type) {
+			case string:
+				return key, v, true
+			case *string:
+				if v == nil {
+					return key, "", false
+				}
+				return key, *v, true
+			default:
+				return key, "", false
+			}
+		}
+	}
+	return "", "", false
 }
 
 func tagDecryptCallback(db *gorm.DB) {
@@ -457,6 +611,7 @@ func selectedTagFieldFilter(db *gorm.DB) func(tagMeta) bool {
 	}
 
 	columns, restricted := db.Statement.SelectAndOmitColumns(false, false)
+	addCommaSeparatedSelectColumns(db, columns)
 	if len(columns) == 0 && !restricted {
 		return nil
 	}
@@ -471,6 +626,80 @@ func selectedTagFieldFilter(db *gorm.DB) func(tagMeta) bool {
 			return selected
 		}
 		return !restricted
+	}
+}
+
+func addCommaSeparatedSelectColumns(db *gorm.DB, columns map[string]bool) {
+	for _, column := range db.Statement.Selects {
+		addCommaSeparatedColumn(db, columns, column, true)
+	}
+	for _, column := range db.Statement.Omits {
+		addCommaSeparatedColumn(db, columns, column, false)
+	}
+}
+
+func addCommaSeparatedColumn(db *gorm.DB, columns map[string]bool, column string, selected bool) {
+	if !strings.Contains(column, ",") {
+		return
+	}
+
+	for _, part := range strings.Split(column, ",") {
+		name := strings.TrimSpace(part)
+		name = strings.Trim(name, "`\"")
+		if name == "" || strings.ContainsAny(name, " ()") {
+			continue
+		}
+		if dot := strings.LastIndex(name, "."); dot >= 0 {
+			name = strings.Trim(name[dot+1:], "`\"")
+		}
+		if field := db.Statement.Schema.LookUpField(name); field != nil && field.DBName != "" {
+			columns[field.DBName] = selected
+			continue
+		}
+		columns[name] = selected
+	}
+}
+
+func isStringLikeType(t reflect.Type) bool {
+	return t.Kind() == reflect.String || (t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.String)
+}
+
+func stringLikeValue(v reflect.Value) (string, bool) {
+	if !v.IsValid() {
+		return "", false
+	}
+	switch v.Kind() {
+	case reflect.String:
+		return v.String(), true
+	case reflect.Ptr:
+		if v.IsNil() || v.Type().Elem().Kind() != reflect.String {
+			return "", false
+		}
+		return v.Elem().String(), true
+	default:
+		return "", false
+	}
+}
+
+func setStringLikeValue(v reflect.Value, value string) bool {
+	if !v.IsValid() || !v.CanSet() {
+		return false
+	}
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString(value)
+		return true
+	case reflect.Ptr:
+		if v.Type().Elem().Kind() != reflect.String {
+			return false
+		}
+		if v.IsNil() {
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		v.Elem().SetString(value)
+		return true
+	default:
+		return false
 	}
 }
 
@@ -490,25 +719,28 @@ func tagModelStructType(model interface{}) (reflect.Type, error) {
 	return t, nil
 }
 
-func blindIndexForTagField(model interface{}, fieldName, plaintext string) (idx string, indexCol string, err error) {
+func blindIndexForTagField(model interface{}, fieldName, plaintext string) (idx, col string, err error) {
+	t, err := tagModelStructType(model)
+	if err != nil {
+		return "", "", err
+	}
+
 	meta, err := getModelMeta(model)
 	if err != nil {
 		return "", "", err
 	}
-	csField := strings.ToLower(fieldName)
-	tm, ok := meta.byField[csField]
+
+	tm, ok := meta.byField[strings.ToLower(fieldName)]
 	if !ok {
 		return "", "", fmt.Errorf("gormcrypt: no gormcrypt tag for field %q", fieldName)
 	}
-	st, err := tagModelStructType(model)
+
+	er, err := getTagRow(t, meta)
 	if err != nil {
 		return "", "", err
 	}
-	er, err := getTagRow(st, meta)
-	if err != nil {
-		return "", "", err
-	}
-	idx, err = er.GetBlindIndex(csField, plaintext, tm.indexCol)
+
+	idx, err = er.GetBlindIndex(tm.csField, plaintext, tm.indexCol)
 	if err != nil {
 		return "", "", fmt.Errorf("gormcrypt: blind index for field %q: %w", fieldName, err)
 	}

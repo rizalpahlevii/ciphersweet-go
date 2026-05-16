@@ -11,6 +11,16 @@ import (
 	"gorm.io/gorm"
 )
 
+type PtrUser struct {
+	ID         uint
+	Phone      *string `gorm:"column:phone" gormcrypt:"blind_index=phone_index"`
+	PhoneIndex *string `gorm:"column:phone_index"`
+}
+
+func (PtrUser) TableName() string {
+	return "ptr_users"
+}
+
 func resetGormcryptTestState(t *testing.T) {
 	t.Helper()
 	metaCacheMu.Lock()
@@ -61,6 +71,21 @@ func TestGetModelMetaCachesFields(t *testing.T) {
 	meta2, err := getModelMeta(&User{})
 	if err != nil || meta2 != meta {
 		t.Fatal("expected identical cached meta")
+	}
+}
+
+func TestGetModelMetaIncludesPointerStringFields(t *testing.T) {
+	resetGormcryptTestState(t)
+	meta, err := getModelMeta(&PtrUser{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(meta.tags) != 1 || len(meta.byField) != 1 {
+		t.Fatalf("tags=%d byField=%d", len(meta.tags), len(meta.byField))
+	}
+	phone := meta.byField["phone"]
+	if phone.fieldName != "Phone" || phone.indexField != "PhoneIndex" {
+		t.Fatalf("phone meta: %+v", phone)
 	}
 }
 
@@ -171,6 +196,67 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 	}
 	if u.Email != "plain@example.com" || u.Phone != "+100" || u.Nisn != "12345" {
 		t.Fatalf("got %+v", u)
+	}
+}
+
+func TestEncryptDecryptPointerStringRoundTrip(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	phone := "+6281234567890"
+	u := &PtrUser{Phone: &phone}
+	if err := EncryptTagged(u); err != nil {
+		t.Fatal(err)
+	}
+	if u.Phone == nil {
+		t.Fatal("expected encrypted pointer field to remain non-nil")
+	}
+	if !strings.HasPrefix(*u.Phone, "nacl:") && !strings.HasPrefix(*u.Phone, "boring:") {
+		t.Fatalf("expected ciphertext prefix, got %q", *u.Phone)
+	}
+	if u.PhoneIndex == nil || *u.PhoneIndex == "" {
+		t.Fatal("index should be set")
+	}
+	if err := DecryptTagged(u); err != nil {
+		t.Fatal(err)
+	}
+	if u.Phone == nil || *u.Phone != phone {
+		t.Fatalf("got %+v", u.Phone)
+	}
+}
+
+func TestGormCallbacksPointerStringWhereTagWithIDProjection(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	db := testDB(t)
+	if err := db.AutoMigrate(&PtrUser{}); err != nil {
+		t.Skipf("AutoMigrate failed: %v", err)
+	}
+
+	if err := RegisterTagCallbacks(db); err != nil {
+		t.Fatal(err)
+	}
+
+	phone := "+6281234567890"
+	searchPhone := phone
+	u := PtrUser{Phone: &phone}
+	if err := db.Create(&u).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var found PtrUser
+	if err := db.
+		Scopes(WhereTag(&PtrUser{}, "phone", searchPhone)).
+		Select("id").
+		First(&found).Error; err != nil {
+		t.Fatal(err)
+	}
+	if found.ID != u.ID {
+		t.Fatalf("Expected ID %d, got %d", u.ID, found.ID)
+	}
+	if found.Phone != nil {
+		t.Fatalf("Expected unselected phone to remain nil, got %q", *found.Phone)
 	}
 }
 
@@ -336,6 +422,41 @@ func TestGormCallbacksSkipDecryptForUnselectedEncryptedFields(t *testing.T) {
 	}
 }
 
+func TestGormCallbacksDecryptCommaSeparatedSelectFields(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	db := testDB(t)
+	if err := db.AutoMigrate(&User{}); err != nil {
+		t.Skipf("AutoMigrate failed: %v", err)
+	}
+
+	if err := RegisterTagCallbacks(db); err != nil {
+		t.Fatal(err)
+	}
+
+	u := User{
+		Email: "comma@example.com",
+		Phone: "+6284",
+		Nisn:  "9003",
+	}
+	if err := db.Create(&u).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var retrieved User
+	if err := db.Select("id, email").First(&retrieved, u.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if retrieved.Email != "comma@example.com" {
+		t.Fatalf("Expected decrypted email, got %q", retrieved.Email)
+	}
+	if retrieved.Phone != "" || retrieved.Nisn != "" {
+		t.Fatalf("Expected unselected encrypted fields to remain empty, got %+v", retrieved)
+	}
+}
+
 func TestGormCallbacksSkipDecryptForScalarCountDest(t *testing.T) {
 	resetGormcryptTestState(t)
 	Setup(cstesting.NewEngine(t))
@@ -364,5 +485,92 @@ func TestGormCallbacksSkipDecryptForScalarCountDest(t *testing.T) {
 	}
 	if total < 1 {
 		t.Fatalf("Expected count to include inserted user, got %d", total)
+	}
+}
+
+func TestGormCallbacksEncryptColumnUpdate(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	db := testDB(t)
+	if err := db.AutoMigrate(&User{}); err != nil {
+		t.Skipf("AutoMigrate failed: %v", err)
+	}
+
+	if err := RegisterTagCallbacks(db); err != nil {
+		t.Fatal(err)
+	}
+
+	u := User{
+		Email: "before-update@example.com",
+		Phone: "+6285",
+		Nisn:  "9004",
+	}
+	if err := db.Create(&u).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.Model(&User{}).Where("id = ?", u.ID).Update("email", "after-update@example.com").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var rawEmail string
+	if err := db.Table("users").Select("email").Where("id = ?", u.ID).Scan(&rawEmail).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(rawEmail, "nacl:") && !strings.HasPrefix(rawEmail, "boring:") {
+		t.Fatalf("Expected column update to store ciphertext, got %q", rawEmail)
+	}
+
+	var retrieved User
+	if err := db.First(&retrieved, u.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if retrieved.Email != "after-update@example.com" {
+		t.Fatalf("Expected decrypted updated email, got %q", retrieved.Email)
+	}
+}
+
+func TestGormCallbacksEncryptStructUpdates(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	db := testDB(t)
+	if err := db.AutoMigrate(&User{}); err != nil {
+		t.Skipf("AutoMigrate failed: %v", err)
+	}
+
+	if err := RegisterTagCallbacks(db); err != nil {
+		t.Fatal(err)
+	}
+
+	u := User{
+		Email: "before-struct-update@example.com",
+		Phone: "+6286",
+		Nisn:  "9005",
+	}
+	if err := db.Create(&u).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	update := User{Email: "after-struct-update@example.com"}
+	if err := db.Model(&User{}).Where("id = ?", u.ID).Updates(update).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var rawEmail string
+	if err := db.Table("users").Select("email").Where("id = ?", u.ID).Scan(&rawEmail).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(rawEmail, "nacl:") && !strings.HasPrefix(rawEmail, "boring:") {
+		t.Fatalf("Expected struct update to store ciphertext, got %q", rawEmail)
+	}
+
+	var retrieved User
+	if err := db.First(&retrieved, u.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if retrieved.Email != "after-struct-update@example.com" {
+		t.Fatalf("Expected decrypted updated email, got %q", retrieved.Email)
 	}
 }
