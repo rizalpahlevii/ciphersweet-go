@@ -1,6 +1,7 @@
 package gormcrypt
 
 import (
+	"database/sql"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +12,12 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+type NullStringUser struct {
+	ID         uint
+	Email      sql.NullString `gormcrypt:"blind_index=email_index"`
+	EmailIndex sql.NullString
+}
 
 type PtrUser struct {
 	ID         uint
@@ -200,6 +207,40 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncryptByTagPartialCiphertextContinues(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	u := &User{
+		Email: "plain@example.com",
+		Phone: "+100",
+		Nisn:  "12345",
+	}
+	if err := EncryptTagged(u); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace Phone with new plaintext, keep Email as ciphertext.
+	u.Phone = "+200"
+
+	if err := EncryptTagged(u); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(u.Phone, "nacl:") && !strings.HasPrefix(u.Phone, "boring:") {
+		t.Fatalf("Phone should be encrypted, got %q", u.Phone)
+	}
+	if u.PhoneIndex == "" {
+		t.Fatal("PhoneIndex should be set")
+	}
+
+	if err := DecryptTagged(u); err != nil {
+		t.Fatal(err)
+	}
+	if u.Email != "plain@example.com" || u.Phone != "+200" {
+		t.Fatalf("got Email=%q Phone=%q", u.Email, u.Phone)
+	}
+}
+
 func TestEncryptDecryptPointerStringRoundTrip(t *testing.T) {
 	resetGormcryptTestState(t)
 	Setup(cstesting.NewEngine(t))
@@ -223,6 +264,63 @@ func TestEncryptDecryptPointerStringRoundTrip(t *testing.T) {
 	}
 	if u.Phone == nil || *u.Phone != phone {
 		t.Fatalf("got %+v", u.Phone)
+	}
+}
+
+func TestEncryptDecryptNullStringRoundTrip(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	u := &NullStringUser{
+		Email: sql.NullString{String: "nullstring@example.com", Valid: true},
+	}
+	if err := EncryptTagged(u); err != nil {
+		t.Fatal(err)
+	}
+	if u.Email.String == "" || !u.Email.Valid {
+		t.Fatal("Email should remain valid after encrypt")
+	}
+	if !strings.HasPrefix(u.Email.String, "nacl:") && !strings.HasPrefix(u.Email.String, "boring:") {
+		t.Fatalf("expected ciphertext prefix, got %q", u.Email.String)
+	}
+	if u.EmailIndex.String == "" || !u.EmailIndex.Valid {
+		t.Fatal("EmailIndex should be set")
+	}
+	if err := DecryptTagged(u); err != nil {
+		t.Fatal(err)
+	}
+	if u.Email.String != "nullstring@example.com" || !u.Email.Valid {
+		t.Fatalf("got %+v", u.Email)
+	}
+}
+
+func TestEncryptDecryptNullStringSkipsWhenNotValid(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	u := &NullStringUser{
+		Email: sql.NullString{String: "", Valid: false},
+	}
+	if err := EncryptTagged(u); err != nil {
+		t.Fatal(err)
+	}
+	if u.Email.Valid || u.Email.String != "" {
+		t.Fatal("invalid NullString should remain untouched")
+	}
+	if u.EmailIndex.Valid || u.EmailIndex.String != "" {
+		t.Fatal("index should not be set for invalid NullString")
+	}
+}
+
+func TestIsStringLikeTypeNullString(t *testing.T) {
+	if !isStringLikeType(reflect.TypeOf(sql.NullString{})) {
+		t.Fatal("expected sql.NullString to be string-like")
+	}
+	if !isStringLikeType(reflect.TypeOf("")) {
+		t.Fatal("expected string to be string-like")
+	}
+	if !isStringLikeType(reflect.TypeOf((*string)(nil))) {
+		t.Fatal("expected *string to be string-like")
 	}
 }
 
@@ -516,6 +614,39 @@ func TestGormCallbacksSkipEncryptForTableMapUpdatesWithoutModel(t *testing.T) {
 		Where("id = ?", u.ID).
 		Updates(map[string]interface{}{"updated_at": now}).Error; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGormCallbacksNullStringDB(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	db := testDB(t)
+	if err := db.AutoMigrate(&NullStringUser{}); err != nil {
+		t.Skipf("AutoMigrate failed: %v", err)
+	}
+
+	if err := RegisterTagCallbacks(db); err != nil {
+		t.Fatal(err)
+	}
+
+	u := NullStringUser{
+		Email: sql.NullString{String: "ns-integrate@example.com", Valid: true},
+	}
+	if err := db.Create(&u).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.HasPrefix(u.Email.String, "nacl:") && !strings.HasPrefix(u.Email.String, "boring:") {
+		t.Fatalf("Expected ciphertext after create, got %s", u.Email.String)
+	}
+
+	var retrieved NullStringUser
+	if err := db.First(&retrieved, u.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if retrieved.Email.String != "ns-integrate@example.com" || !retrieved.Email.Valid {
+		t.Fatalf("Expected decrypted email, got %+v", retrieved.Email)
 	}
 }
 

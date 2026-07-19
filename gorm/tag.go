@@ -49,6 +49,7 @@ package gormcrypt
 //	db.Scopes(gormcrypt.WhereTagMulti(&User{}, "email", "a@b.c", "phone", "+1")).Find(&users)
 
 import (
+	"database/sql"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -60,6 +61,8 @@ import (
 	"github.com/rizalpahlevii/ciphersweet-go/blindindex"
 	"github.com/rizalpahlevii/ciphersweet-go/row"
 )
+
+var nullStringType = reflect.TypeOf(sql.NullString{})
 
 // ── Tag parsing ───────────────────────────────────────────────────────────────
 
@@ -249,9 +252,8 @@ func encryptByTag(v interface{}) error {
 		if !ok {
 			continue
 		}
-		// Skip if already a ciphertext (idempotent — don't double-encrypt).
 		if strings.HasPrefix(val, "nacl:") || strings.HasPrefix(val, "boring:") {
-			return nil
+			continue
 		}
 		data[tm.csField] = val
 	}
@@ -678,7 +680,16 @@ func addCommaSeparatedColumn(db *gorm.DB, columns map[string]bool, column string
 }
 
 func isStringLikeType(t reflect.Type) bool {
-	return t.Kind() == reflect.String || (t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.String)
+	if t.Kind() == reflect.String {
+		return true
+	}
+	if t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.String {
+		return true
+	}
+	if t == nullStringType {
+		return true
+	}
+	return false
 }
 
 func stringLikeValue(v reflect.Value) (string, bool) {
@@ -693,6 +704,14 @@ func stringLikeValue(v reflect.Value) (string, bool) {
 			return "", false
 		}
 		return v.Elem().String(), true
+	case reflect.Struct:
+		if v.Type() == nullStringType {
+			if !v.FieldByName("Valid").Bool() {
+				return "", false
+			}
+			return v.FieldByName("String").String(), true
+		}
+		return "", false
 	default:
 		return "", false
 	}
@@ -715,6 +734,13 @@ func setStringLikeValue(v reflect.Value, value string) bool {
 		}
 		v.Elem().SetString(value)
 		return true
+	case reflect.Struct:
+		if v.Type() == nullStringType {
+			v.FieldByName("String").SetString(value)
+			v.FieldByName("Valid").SetBool(true)
+			return true
+		}
+		return false
 	default:
 		return false
 	}
