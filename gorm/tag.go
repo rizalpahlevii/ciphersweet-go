@@ -407,6 +407,9 @@ func tagEncryptCallback(db *gorm.DB) {
 	if db.Error != nil || db.Statement == nil || db.Statement.Model == nil {
 		return
 	}
+	if !hasStructModel(db) {
+		return
+	}
 	if err := encryptByTag(db.Statement.Model); err != nil {
 		_ = db.AddError(fmt.Errorf("gormcrypt tag encrypt: %w", err))
 	}
@@ -414,6 +417,9 @@ func tagEncryptCallback(db *gorm.DB) {
 
 func tagUpdateEncryptCallback(db *gorm.DB) {
 	if db.Error != nil || db.Statement == nil || db.Statement.Model == nil {
+		return
+	}
+	if !hasStructModel(db) {
 		return
 	}
 	if err := encryptUpdateMapByTag(db); err != nil {
@@ -429,6 +435,17 @@ func tagUpdateEncryptCallback(db *gorm.DB) {
 			_ = db.AddError(fmt.Errorf("gormcrypt tag encrypt: %w", err))
 		}
 	}
+}
+
+func hasStructModel(db *gorm.DB) bool {
+	if db == nil || db.Statement == nil || db.Statement.Model == nil {
+		return false
+	}
+	t := reflect.TypeOf(db.Statement.Model)
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t.Kind() == reflect.Struct
 }
 
 func encryptUpdateMapByTag(db *gorm.DB) error {

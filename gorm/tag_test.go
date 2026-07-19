@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	cstesting "github.com/rizalpahlevii/ciphersweet-go/cstesting"
 	"github.com/rizalpahlevii/ciphersweet-go/row"
@@ -485,6 +486,36 @@ func TestGormCallbacksSkipDecryptForScalarCountDest(t *testing.T) {
 	}
 	if total < 1 {
 		t.Fatalf("Expected count to include inserted user, got %d", total)
+	}
+}
+
+func TestGormCallbacksSkipEncryptForTableMapUpdatesWithoutModel(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	db := testDB(t)
+	if err := db.AutoMigrate(&User{}); err != nil {
+		t.Skipf("AutoMigrate failed: %v", err)
+	}
+
+	if err := RegisterTagCallbacks(db); err != nil {
+		t.Fatal(err)
+	}
+
+	u := User{
+		Email: "table-update@example.com",
+		Phone: "+6287",
+		Nisn:  "9006",
+	}
+	if err := db.Create(&u).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	if err := db.Table("users").
+		Where("id = ?", u.ID).
+		Updates(map[string]interface{}{"updated_at": now}).Error; err != nil {
+		t.Fatal(err)
 	}
 }
 
