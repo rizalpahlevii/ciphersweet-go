@@ -36,7 +36,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          # Pinned: golangci-lint v1.x cannot read export data from Go >= 1.27.
+          go-version: '1.26'
           cache: true
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
