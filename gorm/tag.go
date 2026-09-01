@@ -339,6 +339,13 @@ func decryptByTagLoaded(v interface{}, isLoaded func(tagMeta) bool) error {
 		if !ok {
 			continue
 		}
+		// Only feed real ciphertext to the decrypter. A tagged column can hold a
+		// non-ciphertext value — an empty string ('' but not NULL) or legacy
+		// plaintext from before encryption / another writer. Leave the field
+		// as-is rather than failing with "missing or invalid 'nacl:' prefix".
+		if !strings.HasPrefix(ct, "nacl:") && !strings.HasPrefix(ct, "boring:") {
+			continue
+		}
 		encData[tm.csField] = ct
 	}
 

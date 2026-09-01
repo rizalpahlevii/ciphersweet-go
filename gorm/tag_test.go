@@ -521,6 +521,36 @@ func TestGormCallbacksSkipDecryptForUnselectedEncryptedFields(t *testing.T) {
 	}
 }
 
+func TestGormCallbacksDecryptEmptyNonNullEncryptedColumn(t *testing.T) {
+	resetGormcryptTestState(t)
+	Setup(cstesting.NewEngine(t))
+
+	db := testDB(t)
+	if err := db.AutoMigrate(&User{}); err != nil {
+		t.Skipf("AutoMigrate failed: %v", err)
+	}
+
+	if err := RegisterTagCallbacks(db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Row written outside the library (legacy data / another service): the
+	// encrypted columns are present but empty ('') — not NULL, not ciphertext.
+	if err := db.Exec(
+		`INSERT INTO users (name, email, email_index, phone, phone_index, nisn, nisn_index) `+
+			`VALUES (?, '', '', '', '', '', '')`, "legacy").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var retrieved User
+	if err := db.Where("name = ?", "legacy").First(&retrieved).Error; err != nil {
+		t.Fatalf("decrypt of empty non-null encrypted column failed: %v", err)
+	}
+	if retrieved.Email != "" || retrieved.Phone != "" || retrieved.Nisn != "" {
+		t.Fatalf("Expected empty plaintext for empty columns, got %+v", retrieved)
+	}
+}
+
 func TestGormCallbacksDecryptCommaSeparatedSelectFields(t *testing.T) {
 	resetGormcryptTestState(t)
 	Setup(cstesting.NewEngine(t))
