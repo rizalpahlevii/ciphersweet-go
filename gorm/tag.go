@@ -846,7 +846,7 @@ func WhereTagMulti(model interface{}, fieldPlaintext ...string) func(*gorm.DB) *
 		col, idx string
 	}
 	var conds []cond
-	for i := 0; i < len(fieldPlaintext); i += 2 {
+	for i := 0; i+1 < len(fieldPlaintext); i += 2 {
 		idx, col, err := blindIndexForTagField(model, fieldPlaintext[i], fieldPlaintext[i+1])
 		if err != nil {
 			resolveErr := err
