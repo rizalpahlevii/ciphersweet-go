@@ -93,7 +93,7 @@ func (p *Plan) Down() string {
 // all registered encrypted/index columns.  Useful for generating a fresh migration.
 func (p *Plan) CreateTable() string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n", p.quote(p.table)))
+	fmt.Fprintf(&sb, "CREATE TABLE IF NOT EXISTS %s (\n", p.quote(p.table))
 
 	switch p.dialect {
 	case PostgreSQL:
@@ -105,9 +105,9 @@ func (p *Plan) CreateTable() string {
 	for _, col := range p.cols {
 		switch col.colType {
 		case "encrypted":
-			sb.WriteString(fmt.Sprintf("    %s TEXT NULL,\n", p.quote(col.name)))
+			fmt.Fprintf(&sb, "    %s TEXT NULL,\n", p.quote(col.name))
 		case "index":
-			sb.WriteString(fmt.Sprintf("    %s VARCHAR(%d) NULL,\n", p.quote(col.name), col.charLength))
+			fmt.Fprintf(&sb, "    %s VARCHAR(%d) NULL,\n", p.quote(col.name), col.charLength)
 		}
 	}
 

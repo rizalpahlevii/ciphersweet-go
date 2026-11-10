@@ -91,7 +91,7 @@ var (
 // getModelMeta parses and caches the tagMeta for a struct type.
 func getModelMeta(v interface{}) (*modelMeta, error) {
 	t := reflect.TypeOf(v)
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
@@ -234,7 +234,7 @@ func encryptByTag(v interface{}) error {
 	}
 
 	rv := reflect.ValueOf(v)
-	for rv.Kind() == reflect.Ptr {
+	for rv.Kind() == reflect.Pointer {
 		rv = rv.Elem()
 	}
 
@@ -318,7 +318,7 @@ func decryptByTagLoaded(v interface{}, isLoaded func(tagMeta) bool) error {
 	}
 
 	rv := reflect.ValueOf(v)
-	for rv.Kind() == reflect.Ptr {
+	for rv.Kind() == reflect.Pointer {
 		rv = rv.Elem()
 	}
 
@@ -451,7 +451,7 @@ func hasStructModel(db *gorm.DB) bool {
 		return false
 	}
 	t := reflect.TypeOf(db.Statement.Model)
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	return t.Kind() == reflect.Struct
@@ -469,7 +469,7 @@ func encryptUpdateMapByTag(db *gorm.DB) error {
 	}
 
 	t := reflect.TypeOf(db.Statement.Model)
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 
@@ -516,7 +516,7 @@ func encryptUpdateStructByTag(db *gorm.DB) error {
 	if !rv.IsValid() {
 		return nil
 	}
-	for rv.Kind() == reflect.Ptr {
+	for rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
 			return nil
 		}
@@ -527,7 +527,7 @@ func encryptUpdateStructByTag(db *gorm.DB) error {
 	}
 
 	t := reflect.TypeOf(db.Statement.Model)
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 
@@ -601,7 +601,7 @@ func tagDecryptCallback(db *gorm.DB) {
 func tagWalkDest(db *gorm.DB, dest interface{}) {
 	isLoaded := selectedTagFieldFilter(db)
 	rv := reflect.ValueOf(dest)
-	for rv.Kind() == reflect.Ptr {
+	for rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
 			return
 		}
@@ -611,7 +611,7 @@ func tagWalkDest(db *gorm.DB, dest interface{}) {
 	case reflect.Slice:
 		for i := 0; i < rv.Len(); i++ {
 			elem := rv.Index(i)
-			if elem.Kind() == reflect.Ptr {
+			if elem.Kind() == reflect.Pointer {
 				if elem.IsNil() {
 					continue
 				}
@@ -690,7 +690,7 @@ func isStringLikeType(t reflect.Type) bool {
 	if t.Kind() == reflect.String {
 		return true
 	}
-	if t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.String {
+	if t.Kind() == reflect.Pointer && t.Elem().Kind() == reflect.String {
 		return true
 	}
 	if t == nullStringType {
@@ -706,7 +706,7 @@ func stringLikeValue(v reflect.Value) (string, bool) {
 	switch v.Kind() {
 	case reflect.String:
 		return v.String(), true
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if v.IsNil() || v.Type().Elem().Kind() != reflect.String {
 			return "", false
 		}
@@ -732,7 +732,7 @@ func setStringLikeValue(v reflect.Value, value string) bool {
 	case reflect.String:
 		v.SetString(value)
 		return true
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if v.Type().Elem().Kind() != reflect.String {
 			return false
 		}
@@ -760,7 +760,7 @@ func tagModelStructType(model interface{}) (reflect.Type, error) {
 		return nil, fmt.Errorf("gormcrypt: model must not be nil")
 	}
 	t := reflect.TypeOf(model)
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
@@ -846,7 +846,7 @@ func WhereTagMulti(model interface{}, fieldPlaintext ...string) func(*gorm.DB) *
 		col, idx string
 	}
 	var conds []cond
-	for i := 0; i < len(fieldPlaintext); i += 2 {
+	for i := 0; i+1 < len(fieldPlaintext); i += 2 {
 		idx, col, err := blindIndexForTagField(model, fieldPlaintext[i], fieldPlaintext[i+1])
 		if err != nil {
 			resolveErr := err
@@ -875,7 +875,7 @@ func WhereTagMulti(model interface{}, fieldPlaintext ...string) func(*gorm.DB) *
 //	}
 func SetTableName(model interface{}, tableName string) {
 	t := reflect.TypeOf(model)
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 
